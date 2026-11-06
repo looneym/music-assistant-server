@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Final, cast
 
+from music_assistant_models.auth import Scope
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
     ConfigEntryType,
@@ -27,7 +28,7 @@ from music_assistant_models.enums import (
     RepeatMode,
     SourceControl,
 )
-from music_assistant_models.errors import AudioError, MediaNotFoundError
+from music_assistant_models.errors import AudioError, InvalidDataError, MediaNotFoundError
 from music_assistant_models.media_items import (
     AudioSource,
     ProviderMapping,
@@ -112,6 +113,7 @@ PLAYBACK_START_TIMEOUT_S = 3.0
 # Debounce before acting on an externally-triggered 'playing' event (see
 # _deferred_play_media_fire for why).
 PLAY_MEDIA_DEBOUNCE_S = 0.5
+PLAY_CONTEXT_TIMEOUT_S = 15.0
 
 # Ignore Spotify volume events for this long after a session becomes active, so
 # the player's own volume wins over the backend's initial value on (re)connect.
@@ -187,6 +189,7 @@ class SpotifyConnectProvider(PluginProvider):
     """Implementation of a Spotify Connect Plugin (backed by SpotifyConnectBackends)."""
 
     reload_on_streams_network_change = True
+    _unregister_play_command: Callable[[], None] | None = None
 
     def __init__(
         self, mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
@@ -281,6 +284,11 @@ class SpotifyConnectProvider(PluginProvider):
     async def loaded_in_mass(self) -> None:
         """Start the Connect daemons and follow the connected players' lifecycle."""
         await super().loaded_in_mass()
+        self._unregister_play_command = self.mass.register_api_command(
+            "spotify_connect/play",
+            self.play_context,
+            required_scope=Scope.PLAYERS_CONTROL,
+        )
         if self._assigned_player_ids:
             self._unsubscribe = self.mass.subscribe(
                 self._on_player_event,
@@ -299,6 +307,9 @@ class SpotifyConnectProvider(PluginProvider):
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
         self._unload_called = True
+        if self._unregister_play_command is not None:
+            self._unregister_play_command()
+            self._unregister_play_command = None
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
@@ -314,6 +325,22 @@ class SpotifyConnectProvider(PluginProvider):
     async def get_audio_sources(self) -> list[AudioSource]:
         """Return the AudioSources this plugin currently exposes."""
         return [daemon.audio_source for daemon in self._daemons.values()]
+
+    async def play_context(self, player_id: str, uri: str) -> None:
+        """
+        Start a Spotify context on a configured Connect player.
+
+        :param player_id: Connected Music Assistant player to play on.
+        :param uri: Spotify track, artist, album, playlist, episode or show URI.
+        """
+        if not re.fullmatch(r"spotify:(track|artist|album|playlist|episode|show):[A-Za-z0-9]{22}", uri):
+            raise InvalidDataError("Expected a Spotify content URI")
+        daemon = self._daemons.get(player_id)
+        if daemon is None or daemon.stop_called:
+            raise MediaNotFoundError(f"No Spotify Connect source for player {player_id}")
+        self.mass.players.get_player(player_id, raise_unavailable=True)
+        async with asyncio.timeout(PLAY_CONTEXT_TIMEOUT_S):
+            await daemon.backend.play(uri)
 
     def get_player_audio_sources(self, player_id: str) -> list[AudioSource]:
         """Return the AudioSource bound to the given connected player, if any."""

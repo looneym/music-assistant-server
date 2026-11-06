@@ -22,7 +22,7 @@ from music_assistant_models.enums import (
     SourceControl,
     StreamType,
 )
-from music_assistant_models.errors import AudioError
+from music_assistant_models.errors import AudioError, InvalidDataError, MediaNotFoundError
 from music_assistant_models.media_items import AudioFormat
 from music_assistant_models.streamdetails import StreamMetadata
 
@@ -496,6 +496,41 @@ async def test_stream_teardown_while_playing_releases_spotify() -> None:
     assert daemon.in_use_by_player is None
     assert daemon.active_session_id is None
     assert backend.calls == [("deactivate", None)]
+
+
+async def test_play_context_targets_the_configured_player_only() -> None:
+    """An automation can start a context without discovering a daemon port."""
+    backend = FakeBackend()
+    provider, _daemon, mass = _make_provider(backend)
+    uri = "spotify:artist:25KNo5GDS6ZpLkjasaecA3"
+
+    await provider.play_context(_PLAYER_ID, uri)
+
+    mass.players.get_player.assert_called_once_with(_PLAYER_ID, raise_unavailable=True)
+    assert backend.calls == [("play", uri)]
+
+
+@pytest.mark.parametrize("uri", ["https://example.com/audio", "spotify:artist:invalid"])
+async def test_play_context_rejects_invalid_content(uri: str) -> None:
+    """The playback command cannot open arbitrary URLs or malformed IDs."""
+    backend = FakeBackend()
+    provider, _daemon, _mass = _make_provider(backend)
+
+    with pytest.raises(InvalidDataError):
+        await provider.play_context(_PLAYER_ID, uri)
+
+    assert backend.calls == []
+
+
+async def test_play_context_does_not_fall_back_to_another_player() -> None:
+    """A missing target fails without directing music to a different room."""
+    backend = FakeBackend()
+    provider, _daemon, _mass = _make_provider(backend)
+
+    with pytest.raises(MediaNotFoundError):
+        await provider.play_context("missing", "spotify:artist:25KNo5GDS6ZpLkjasaecA3")
+
+    assert backend.calls == []
 
 
 async def test_stream_teardown_after_spotify_pause_does_not_pause_again() -> None:
