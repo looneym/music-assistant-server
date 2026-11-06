@@ -333,7 +333,9 @@ class SpotifyConnectProvider(PluginProvider):
         :param player_id: Connected Music Assistant player to play on.
         :param uri: Spotify track, artist, album, playlist, episode or show URI.
         """
-        if not re.fullmatch(r"spotify:(track|artist|album|playlist|episode|show):[A-Za-z0-9]{22}", uri):
+        if not re.fullmatch(
+            r"spotify:(track|artist|album|playlist|episode|show):[A-Za-z0-9]{22}", uri
+        ):
             raise InvalidDataError("Expected a Spotify content URI")
         daemon = self._daemons.get(player_id)
         if daemon is None or daemon.stop_called:
