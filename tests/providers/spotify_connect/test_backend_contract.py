@@ -514,6 +514,42 @@ async def test_stream_teardown_after_spotify_pause_does_not_pause_again() -> Non
     assert backend.calls == []
 
 
+async def test_resume_before_paused_stream_teardown_restarts_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late EOF from the paused stream must not deactivate a resumed session."""
+    monkeypatch.setattr(provider_mod, "PAUSE_EOF_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(provider_mod, "PLAY_MEDIA_DEBOUNCE_S", 0.01)
+    backend = FakeBackend()
+    provider, daemon, mass = _make_provider(
+        backend,
+        playing=False,
+        session_active=True,
+        active_player_id="player1",
+        in_use_by_queue="player1",
+        active_session_id="sess1",
+    )
+
+    async def stalled_read() -> bytes:
+        await asyncio.Event().wait()
+        return b""
+
+    monkeypatch.setattr(backend, "get_audio_reader", lambda: stalled_read)
+    stream = provider.get_audio_stream(MagicMock(item_id=_PLAYER_ID))
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+    await provider._handle_backend_event(daemon, BackendEvent(BackendEventType.PLAYING))
+    mass.player_queues.play_media.assert_not_awaited()
+    await provider.on_source_unselected(_PLAYER_ID, "player1", "sess1")
+
+    assert backend.calls == []
+    assert daemon.spotify_session_active
+    assert daemon.pending_play_media_task is not None
+    await daemon.pending_play_media_task
+    mass.player_queues.play_media.assert_awaited_once_with("player1", _SOURCE_URI)
+
+
 async def test_stale_stream_teardown_is_ignored() -> None:
     """A late unselect from a superseded stream session releases and pauses nothing."""
     backend = FakeBackend()

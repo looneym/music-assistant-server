@@ -151,6 +151,8 @@ class _PlayerDaemon:
     # stream request — used to reject stale on_source_unselected callbacks
     # after a same-queue reconnect supersedes the previous request.
     active_session_id: str | None = None
+    # A paused stream can finish teardown after a subsequent resume event.
+    paused_stream_session_id: str | None = None
     # tracks the backend's play/pause state from its 'playing' / 'paused' /
     # 'inactive' events; gates the resume kick in on_source_selected (skip if
     # already playing) and the play_media trigger in the event handler.
@@ -385,6 +387,7 @@ class SpotifyConnectProvider(PluginProvider):
         read_chunk = daemon.backend.get_audio_reader()
         if read_chunk is None:
             raise AudioError("Spotify Connect daemon is not running")
+        stream_session_id = daemon.active_session_id
         # No pacing here: the streams controller's realtime pacer (ffmpeg readrate
         # with a small initial burst) is the single pacing authority for live
         # sources. Backpressure through the audio pipe bounds how far the backend
@@ -400,6 +403,8 @@ class SpotifyConnectProvider(PluginProvider):
                 # stopped / session gone) end the stream so the player goes idle;
                 # a brief buffering gap while still playing just keeps waiting.
                 if not daemon.playing:
+                    if daemon.active_session_id == stream_session_id:
+                        daemon.paused_stream_session_id = stream_session_id
                     return
                 continue
             if not chunk:
@@ -520,9 +525,16 @@ class SpotifyConnectProvider(PluginProvider):
         # the live claim of the new stream.
         if daemon.active_session_id != stream_session_id:
             return
+        ended_on_pause = daemon.paused_stream_session_id == stream_session_id
+        daemon.paused_stream_session_id = None
         daemon.active_session_id = None
         if daemon.in_use_by_player == owner_player_id:
             daemon.in_use_by_player = None
+        if ended_on_pause:
+            # A resume may have arrived while this stream was still claimed.
+            # Its playing event could not start a replacement until now.
+            self._schedule_play_media(daemon)
+            return
         if daemon.playing:
             # MA-side stop/queue-clear: release the Spotify session so the app
             # drops the device as its playback target — the daemon would
