@@ -507,7 +507,7 @@ async def test_play_context_targets_the_configured_player_only() -> None:
     await provider.play_context(_PLAYER_ID, uri)
 
     mass.players.get_player.assert_called_once_with(_PLAYER_ID, raise_unavailable=True)
-    assert backend.calls == [("play", uri)]
+    assert backend.calls == [("play", (uri, None))]
 
 
 @pytest.mark.parametrize("uri", ["https://example.com/audio", "spotify:artist:invalid"])
