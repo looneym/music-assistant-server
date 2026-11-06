@@ -18,6 +18,7 @@ import pytest
 from music_assistant_models.enums import (
     ContentType,
     MediaType,
+    PlaybackState,
     RepeatMode,
     SourceControl,
     StreamType,
@@ -501,13 +502,52 @@ async def test_stream_teardown_while_playing_releases_spotify() -> None:
 async def test_play_context_targets_the_configured_player_only() -> None:
     """An automation can start a context without discovering a daemon port."""
     backend = FakeBackend()
-    provider, _daemon, mass = _make_provider(backend)
+    provider, _daemon, mass = _make_provider(
+        backend, playing=True, session_active=True, in_use_by_queue=_PLAYER_ID
+    )
+    mass.players.get_player.return_value.playback_state = PlaybackState.PLAYING
     uri = "spotify:artist:25KNo5GDS6ZpLkjasaecA3"
 
-    await provider.play_context(_PLAYER_ID, uri)
+    result = await provider.play_context(_PLAYER_ID, uri)
 
     mass.players.get_player.assert_called_once_with(_PLAYER_ID, raise_unavailable=True)
     assert backend.calls == [("play", (uri, None))]
+    assert result == {"player_id": _PLAYER_ID, "device_playback_state": "playing"}
+
+
+async def test_play_context_waits_for_the_device_not_only_the_backend() -> None:
+    """Backend playback alone must not be reported as successful speaker output."""
+    backend = FakeBackend()
+    provider, _daemon, mass = _make_provider(
+        backend, playing=True, session_active=True, in_use_by_queue=_PLAYER_ID
+    )
+    player = mass.players.get_player.return_value
+    player.playback_state = PlaybackState.IDLE
+    task = asyncio.create_task(
+        provider.play_context(_PLAYER_ID, "spotify:artist:25KNo5GDS6ZpLkjasaecA3")
+    )
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    player.playback_state = PlaybackState.PLAYING
+    result = await asyncio.wait_for(task, 1)
+    assert result["device_playback_state"] == "playing"
+
+
+async def test_play_context_times_out_when_the_device_never_plays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent output fails within the deadline without selecting another player."""
+    monkeypatch.setattr(provider_mod, "PLAY_CONTEXT_TIMEOUT_S", 0.01)
+    backend = FakeBackend()
+    provider, _daemon, mass = _make_provider(
+        backend, playing=True, session_active=True, in_use_by_queue=_PLAYER_ID
+    )
+    mass.players.get_player.return_value.playback_state = PlaybackState.IDLE
+
+    with pytest.raises(TimeoutError):
+        await provider.play_context(_PLAYER_ID, "spotify:artist:25KNo5GDS6ZpLkjasaecA3")
+
+    assert len(backend.calls) == 1
 
 
 @pytest.mark.parametrize("uri", ["https://example.com/audio", "spotify:artist:invalid"])

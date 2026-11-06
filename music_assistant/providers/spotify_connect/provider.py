@@ -24,6 +24,7 @@ from music_assistant_models.enums import (
     ConfigEntryType,
     EventType,
     MediaType,
+    PlaybackState,
     ProviderFeature,
     RepeatMode,
     SourceControl,
@@ -326,9 +327,9 @@ class SpotifyConnectProvider(PluginProvider):
         """Return the AudioSources this plugin currently exposes."""
         return [daemon.audio_source for daemon in self._daemons.values()]
 
-    async def play_context(self, player_id: str, uri: str) -> None:
+    async def play_context(self, player_id: str, uri: str) -> dict[str, str]:
         """
-        Start a Spotify context on a configured Connect player.
+        Start a Spotify context and wait for the target player's playback report.
 
         :param player_id: Connected Music Assistant player to play on.
         :param uri: Spotify track, artist, album, playlist, episode or show URI.
@@ -340,9 +341,18 @@ class SpotifyConnectProvider(PluginProvider):
         daemon = self._daemons.get(player_id)
         if daemon is None or daemon.stop_called:
             raise MediaNotFoundError(f"No Spotify Connect source for player {player_id}")
-        self.mass.players.get_player(player_id, raise_unavailable=True)
+        player = self.mass.players.get_player(player_id, raise_unavailable=True)
+        assert player is not None
         async with asyncio.timeout(PLAY_CONTEXT_TIMEOUT_S):
             await daemon.backend.play(uri)
+            while not (
+                daemon.playing
+                and daemon.spotify_session_active
+                and daemon.in_use_by_player == player_id
+                and player.playback_state == PlaybackState.PLAYING
+            ):
+                await asyncio.sleep(0.1)
+        return {"player_id": player_id, "device_playback_state": player.playback_state.value}
 
     def get_player_audio_sources(self, player_id: str) -> list[AudioSource]:
         """Return the AudioSource bound to the given connected player, if any."""
